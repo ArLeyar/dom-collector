@@ -13,7 +13,7 @@ A tool for collecting depth of market (DOM) data from cryptocurrency exchanges.
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/dom-collector.git
+git clone https://github.com/ArLeyar/dom-collector.git
 cd dom-collector
 
 # Install with Poetry
