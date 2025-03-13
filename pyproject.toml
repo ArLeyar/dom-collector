@@ -1,0 +1,41 @@
+[tool.poetry]
+name = "dom-collector"
+version = "0.1.0"
+description = "A Python project for DOM collection"
+authors = ["User"]
+readme = "README.md"
+packages = [{include = "dom_collector", from = "src"}]
+
+[tool.poetry.dependencies]
+python = "^3.13.2"
+requests = "^2.32.3"
+beautifulsoup4 = "^4.13.3"
+websockets = "^15.0.1"
+python-dotenv = "^1.0.1"
+pyarrow = "^19.0.1"
+pandas = "^2.2.3"
+loguru = "^0.7.2"
+
+[tool.poetry.group.dev.dependencies]
+pytest = "^8.3.5"
+black = "^25.1.0"
+isort = "^6.0.1"
+mypy = "^1.15.0"
+
+[tool.poetry.scripts]
+dom-collector = "dom_collector.cli:main"
+
+[build-system]
+requires = ["poetry-core"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.pytest.ini_options]
+testpaths = ["src/dom_collector/tests"]
+
+[tool.black]
+line-length = 88
+target-version = ["py313"]
+
+[tool.isort]
+profile = "black"
+line_length = 88
