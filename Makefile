@@ -3,7 +3,8 @@
 PYTHON = python
 MODULE = src.dom_collector.cli
 EXCHANGE = binance
-SAVE_INTERVAL = 300.0
+INTERVAL = 1.0
+SNAPSHOTS_PER_FILE = 60
 
 help:
 	@echo "DOM Collector Makefile"
@@ -16,25 +17,25 @@ help:
 	@echo "  make clean-snapshots    - Remove all snapshot files"
 	@echo "  make test               - Run all tests"
 	@echo ""
-	@echo "All collection commands save snapshots every $(SAVE_INTERVAL) seconds"
+	@echo "Snapshots are taken every $(INTERVAL) seconds with $(SNAPSHOTS_PER_FILE) snapshots per file"
 
 collect-btc:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol btcusdt --auto-save-interval $(SAVE_INTERVAL)
+	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol btcusdt --interval $(INTERVAL) --snapshots-per-file $(SNAPSHOTS_PER_FILE)
 
 collect-eth:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol ethusdt --auto-save-interval $(SAVE_INTERVAL)
+	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol ethusdt --interval $(INTERVAL) --snapshots-per-file $(SNAPSHOTS_PER_FILE)
 
 collect-sol:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol solusdt --auto-save-interval $(SAVE_INTERVAL)
+	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol solusdt --interval $(INTERVAL) --snapshots-per-file $(SNAPSHOTS_PER_FILE)
 
 collect-all:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol btcusdt --auto-save-interval $(SAVE_INTERVAL) & \
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol ethusdt --auto-save-interval $(SAVE_INTERVAL) & \
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol solusdt --auto-save-interval $(SAVE_INTERVAL)
+	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol btcusdt --interval $(INTERVAL) --snapshots-per-file $(SNAPSHOTS_PER_FILE) & \
+	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol ethusdt --interval $(INTERVAL) --snapshots-per-file $(SNAPSHOTS_PER_FILE) & \
+	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol solusdt --interval $(INTERVAL) --snapshots-per-file $(SNAPSHOTS_PER_FILE)
 
 clean-snapshots:
 	rm -rf snapshots/*.parquet 

@@ -90,37 +90,4 @@ def test_process_event_invalid():
     }
     
     assert order_book.process_event(event1) is False
-    assert order_book.process_event(event2) is False
-
-
-def test_get_order_book():
-    """Test getting the current order book."""
-    order_book = BinanceOrderBook()
-    order_book.last_update_id = 12345
-    
-    # Create an order book with many entries
-    order_book.order_book = {
-        "bids": {
-            price: float(price) for price in [0.01, 0.02, 0.03, 0.04, 0.05, 
-                                             0.06, 0.07, 0.08, 0.09, 0.10, 0.11]
-        },
-        "asks": {
-            price: float(price) for price in [0.12, 0.13, 0.14, 0.15, 0.16, 
-                                             0.17, 0.18, 0.19, 0.20, 0.21, 0.22]
-        }
-    }
-    
-    result = order_book.get_order_book()
-    
-    # Should only return top 10 entries
-    assert len(result["bids"]) == 10
-    assert len(result["asks"]) == 10
-    assert result["lastUpdateId"] == 12345
-    
-    # Bids should be sorted in descending order
-    bids = list(result["bids"].keys())
-    assert bids == sorted(bids, reverse=True)
-    
-    # Asks should be sorted in ascending order
-    asks = list(result["asks"].keys())
-    assert asks == sorted(asks) 
+    assert order_book.process_event(event2) is False 

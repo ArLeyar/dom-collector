@@ -28,11 +28,11 @@ poetry install
 # Display Binance order book for BTCUSDT with default settings
 python -m src.dom_collector.cli binance
 
-# Display Binance order book for ETHUSDT with 20 levels
-python -m src.dom_collector.cli binance --symbol ethusdt --display 20
+# Use a custom symbol and max depth
+python -m src.dom_collector.cli binance --symbol ethusdt --max-depth 20000
 
-# Set a custom auto-save interval (default is 300 seconds)
-python -m src.dom_collector.cli binance --auto-save-interval 60
+# Set a custom snapshot interval and snapshots per file
+python -m src.dom_collector.cli binance --interval 5.0 --snapshots-per-file 1800
 ```
 
 ### Using the Makefile
@@ -60,7 +60,7 @@ make clean-snapshots
 make test
 ```
 
-All collection commands save snapshots every 5 minutes.
+By default, snapshots are taken every 1 second with 300 snapshots per file (5 minutes of data).
 
 ## Testing
 

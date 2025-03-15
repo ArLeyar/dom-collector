@@ -1,10 +1,8 @@
-"""Binance order book implementation."""
-
 import asyncio
 import json
 import os
 import time
-from typing import Dict
+from typing import Dict, Optional
 
 import requests
 import websockets
@@ -19,25 +17,52 @@ BINANCE_SECRET_KEY = os.getenv("BINANCE_SECRET_KEY")
 
 
 class BinanceOrderBook:
-    def __init__(self, symbol: str = "btcusdt", depth_limit: int = 5000):
+    def __init__(self, symbol: str = "btcusdt", depth_limit: int = 5000, max_depth: int = 10000):
         self.symbol = symbol.lower()
         self.depth_limit = depth_limit
+        self.max_depth = max_depth
         self.base_url = "https://api.binance.com"
         self.ws_url = f"wss://stream.binance.com:9443/ws/{self.symbol}@depth"
         self.snapshot_url = f"{self.base_url}/api/v3/depth"
         self.order_book: Dict[str, Dict[float, float]] = {"bids": {}, "asks": {}}
         self.last_update_id = 0
         self.buffer = []
-        self.is_processing = False
         self.last_heartbeat = time.time()
-        logger.info(f"Initialized BinanceOrderBook for {self.symbol} with depth limit {self.depth_limit}")
+        self.last_message_time = time.time()
+        self.connection_state = "disconnected"
+        self.reconnect_count = 0
+        
+        self.max_reconnect_attempts = 10
+        self.connection_timeout = 30
+        self.websocket: Optional[websockets.WebSocketClientProtocol] = None
+        
+        self.is_connected = False
+        
+        logger.info(f"Initialized BinanceOrderBook for {self.symbol} with depth limit {self.depth_limit} and max depth {self.max_depth}")
+        logger.info(f"Connection settings: max_reconnect_attempts={self.max_reconnect_attempts}, connection_timeout={self.connection_timeout}s")
 
     async def fetch_snapshot(self) -> Dict:
         params = {"symbol": self.symbol.upper(), "limit": self.depth_limit}
         logger.debug(f"Fetching order book snapshot for {self.symbol.upper()}")
-        response = requests.get(self.snapshot_url, params=params)
-        response.raise_for_status()
-        return response.json()
+        
+        retry_count = 0
+        max_retries = 5
+        retry_delay = 1
+        
+        while retry_count < max_retries:
+            try:
+                response = requests.get(self.snapshot_url, params=params, timeout=10)
+                response.raise_for_status()
+                return response.json()
+            except (requests.RequestException, requests.Timeout) as e:
+                retry_count += 1
+                logger.warning(f"Snapshot request failed (attempt {retry_count}/{max_retries}): {e}")
+                if retry_count < max_retries:
+                    await asyncio.sleep(retry_delay)
+                    retry_delay = min(retry_delay * 2, 30)
+                else:
+                    logger.error(f"Failed to fetch snapshot after {max_retries} attempts")
+                    raise
 
     def apply_snapshot(self, snapshot: Dict) -> None:
         self.order_book = {"bids": {}, "asks": {}}
@@ -51,9 +76,23 @@ class BinanceOrderBook:
             price, qty = float(ask[0]), float(ask[1])
             if qty > 0:
                 self.order_book["asks"][price] = qty
+        
+        self._trim_order_book()
                 
         self.last_update_id = snapshot["lastUpdateId"]
         logger.info(f"Applied snapshot with lastUpdateId: {self.last_update_id}")
+        logger.info(f"Order book contains {len(self.order_book['bids'])} bids and {len(self.order_book['asks'])} asks")
+
+    def _trim_order_book(self) -> None:
+        if len(self.order_book["bids"]) > self.max_depth:
+            sorted_bids = sorted(self.order_book["bids"].items(), reverse=True)
+            self.order_book["bids"] = dict(sorted_bids[:self.max_depth])
+            logger.debug(f"Trimmed bids to {self.max_depth} levels")
+            
+        if len(self.order_book["asks"]) > self.max_depth:
+            sorted_asks = sorted(self.order_book["asks"].items())
+            self.order_book["asks"] = dict(sorted_asks[:self.max_depth])
+            logger.debug(f"Trimmed asks to {self.max_depth} levels")
 
     def process_event(self, event: Dict) -> bool:
         if event["u"] < self.last_update_id:
@@ -77,6 +116,8 @@ class BinanceOrderBook:
                 self.order_book["asks"].pop(price, None)
             else:
                 self.order_book["asks"][price] = qty
+        
+        self._trim_order_book()
                 
         self.last_update_id = event["u"]
         logger.debug(f"Processed event with u={event['u']}")
@@ -84,7 +125,13 @@ class BinanceOrderBook:
 
     async def handle_websocket_message(self, websocket):
         try:
-            message = await websocket.recv()
+            message = await asyncio.wait_for(websocket.recv(), timeout=self.connection_timeout)
+            self.last_message_time = time.time()
+            
+            if not self.is_connected:
+                logger.info("Connection restored, receiving messages again")
+                self.is_connected = True
+                
             data = json.loads(message)
             
             if isinstance(data, dict) and "ping" in data:
@@ -93,20 +140,71 @@ class BinanceOrderBook:
                 return None
                 
             return data
+        except asyncio.TimeoutError:
+            if self.is_connected:
+                logger.warning(f"WebSocket message timeout after {self.connection_timeout}s - reconnecting")
+                self.is_connected = False
+            return None
+        except websockets.exceptions.ConnectionClosed as e:
+            if self.is_connected:
+                logger.warning(f"WebSocket connection closed: {e}")
+                self.is_connected = False
+            return None
         except Exception as e:
-            logger.error(f"Error handling WebSocket message: {e}")
+            if self.is_connected:
+                logger.error(f"Error handling WebSocket message: {e}")
+                self.is_connected = False
             return None
 
     async def send_heartbeat(self, websocket):
         while True:
             try:
+                time_since_last_message = time.time() - self.last_message_time
+                if time_since_last_message > self.connection_timeout:
+                    if self.is_connected:
+                        logger.warning(f"No messages received for {time_since_last_message:.1f}s, connection may be stale")
+                        self.is_connected = False
+                    break
+                
                 if time.time() - self.last_heartbeat > 20:
-                    await websocket.pong(b'')
-                    self.last_heartbeat = time.time()
-                await asyncio.sleep(15)
+                    try:
+                        await asyncio.wait_for(websocket.pong(b''), timeout=5)
+                        self.last_heartbeat = time.time()
+                        logger.debug("Sent heartbeat ping")
+                    except (asyncio.TimeoutError, websockets.exceptions.ConnectionClosed):
+                        if self.is_connected:
+                            logger.warning("Failed to send heartbeat, connection may be lost")
+                            self.is_connected = False
+                        break
+                
+                await asyncio.sleep(5)
+            except asyncio.CancelledError:
+                logger.debug("Heartbeat task cancelled")
+                break
             except Exception as e:
                 logger.error(f"Heartbeat error: {e}")
                 break
+        
+        self.connection_state = "reconnecting"
+
+    async def connection_monitor(self):
+        while True:
+            try:
+                await asyncio.sleep(5)
+                
+                time_since_last_message = time.time() - self.last_message_time
+                if time_since_last_message > self.connection_timeout:
+                    if self.is_connected:
+                        logger.warning(f"Connection monitor: No messages for {time_since_last_message:.1f}s")
+                        self.is_connected = False
+                    self.connection_state = "reconnecting"
+                    break
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Connection monitor error: {e}")
+        
+        return
 
     async def manage_order_book(self):
         reconnect_delay = 1
@@ -114,17 +212,40 @@ class BinanceOrderBook:
         
         while True:
             try:
-                async with websockets.connect(self.ws_url) as websocket:
+                self.connection_state = "connecting"
+                logger.info(f"Connecting to {self.ws_url} (attempt {self.reconnect_count + 1})")
+                
+                connection_timeout = min(30 + (self.reconnect_count * 5), 120)
+                
+                async with websockets.connect(
+                    self.ws_url,
+                    ping_interval=20,
+                    ping_timeout=10,
+                    close_timeout=5,
+                    max_size=None,
+                    max_queue=None,
+                    ssl=True
+                ) as websocket:
+                    self.websocket = websocket
+                    self.connection_state = "connected"
+                    self.is_connected = True
                     logger.info(f"Connected to {self.ws_url}")
                     self.last_heartbeat = time.time()
+                    self.last_message_time = time.time()
+                    self.reconnect_count = 0
                     
                     heartbeat_task = asyncio.create_task(self.send_heartbeat(websocket))
+                    monitor_task = asyncio.create_task(self.connection_monitor())
                     
                     self.buffer = []
                     
                     first_event = await self.handle_websocket_message(websocket)
                     if not first_event:
                         logger.warning("Failed to get first event, reconnecting...")
+                        heartbeat_task.cancel()
+                        monitor_task.cancel()
+                        await asyncio.sleep(reconnect_delay)
+                        reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
                         continue
                         
                     first_u = first_event["U"]
@@ -170,33 +291,56 @@ class BinanceOrderBook:
                     logger.info("Starting to process live events")
                     reconnect_delay = 1
                     
-                    while True:
+                    while self.connection_state == "connected":
                         event = await self.handle_websocket_message(websocket)
                         if not event:
+                            if self.connection_state == "reconnecting":
+                                logger.warning("Connection monitor triggered reconnection")
+                                break
                             continue
                             
                         if not self.process_event(event):
                             logger.error("Invalid live event, restarting")
+                            self.connection_state = "reconnecting"
                             break
-                            
-                    heartbeat_task.cancel()
                     
+                    heartbeat_task.cancel()
+                    monitor_task.cancel()
+                    try:
+                        await heartbeat_task
+                        await monitor_task
+                    except asyncio.CancelledError:
+                        pass
+                    
+            except (websockets.exceptions.ConnectionClosed, 
+                    websockets.exceptions.InvalidStatusCode,
+                    websockets.exceptions.InvalidMessage,
+                    ConnectionRefusedError,
+                    ConnectionResetError,
+                    ConnectionError,
+                    OSError) as e:
+                if self.is_connected:
+                    logger.warning(f"WebSocket connection error: {e}")
+                    self.is_connected = False
+                self.connection_state = "disconnected"
+            except asyncio.CancelledError:
+                logger.info("Order book manager task cancelled")
+                break
             except Exception as e:
-                logger.error(f"WebSocket error: {e}")
-                
-                logger.info(f"Reconnecting in {reconnect_delay} seconds...")
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, max_reconnect_delay)
-
-    def get_order_book(self, limit: int = 10) -> Dict:
-        return {
-            "bids": dict(sorted(self.order_book["bids"].items(), reverse=True)[:limit]),
-            "asks": dict(sorted(self.order_book["asks"].items())[:limit]),
-            "lastUpdateId": self.last_update_id,
-            "symbol": self.symbol.upper(),
-            "total_bids": len(self.order_book["bids"]),
-            "total_asks": len(self.order_book["asks"])
-        }
+                if self.is_connected:
+                    logger.error(f"WebSocket error: {e}")
+                    self.is_connected = False
+                self.connection_state = "disconnected"
+            
+            self.reconnect_count += 1
+            if self.reconnect_count > self.max_reconnect_attempts:
+                logger.warning(f"Reached maximum reconnection attempts ({self.max_reconnect_attempts}), resetting counter and increasing delay")
+                reconnect_delay = min(reconnect_delay * 2, 120)
+                self.reconnect_count = 0
+            
+            logger.info(f"Reconnecting in {reconnect_delay} seconds... (attempt {self.reconnect_count}/{self.max_reconnect_attempts})")
+            await asyncio.sleep(reconnect_delay)
+            reconnect_delay = min(reconnect_delay * 1.5, max_reconnect_delay)
 
     def get_full_order_book(self) -> Dict:
         return {
@@ -205,31 +349,11 @@ class BinanceOrderBook:
             "lastUpdateId": self.last_update_id,
             "symbol": self.symbol.upper(),
             "total_bids": len(self.order_book["bids"]),
-            "total_asks": len(self.order_book["asks"])
+            "total_asks": len(self.order_book["asks"]),
+            "connection_state": self.connection_state,
+            "max_depth": self.max_depth
         }
 
     async def start(self):
         logger.info(f"Starting order book manager for {self.symbol.upper()}")
-        await self.manage_order_book()
-
-
-async def main():
-    symbol = "btcusdt"
-    logger.info(f"Initializing order book for {symbol}")
-    order_book = BinanceOrderBook(symbol)
-    
-    order_book_task = asyncio.create_task(order_book.start())
-    
-    try:
-        while True:
-            await asyncio.sleep(1)
-            current_book = order_book.get_order_book()
-            logger.info(f"Order Book for {current_book['symbol']} (Update ID: {current_book['lastUpdateId']})")
-            logger.info(f"Total Bids: {current_book['total_bids']}, Total Asks: {current_book['total_asks']}")
-    except KeyboardInterrupt:
-        logger.info("Keyboard interrupt received")
-        order_book_task.cancel()
-
-
-if __name__ == "__main__":
-    asyncio.run(main()) 
+        await self.manage_order_book() 

@@ -16,21 +16,23 @@ class OrderBookSnapshotSaver:
     def __init__(
         self,
         output_dir: str = "snapshots",
-        max_snapshots_per_file: int = 3600,
-        save_all_levels: bool = True,
+        snapshots_per_file: int = 3600,
     ):
         self.output_dir = output_dir
-        self.max_snapshots_per_file = max_snapshots_per_file
-        self.save_all_levels = save_all_levels
+        self.snapshots_per_file = snapshots_per_file
         self.snapshots = []
         self.snapshot_count = 0
         self.current_file_index = 0
-        self.last_save_time = time.time()
         
         # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"Initialized OrderBookSnapshotSaver with output directory: {output_dir}")
-        logger.info(f"Max snapshots per file: {max_snapshots_per_file}, save all levels: {save_all_levels}")
+        logger.info(f"Snapshots per file: {snapshots_per_file}")
+    
+    @property
+    def pending_snapshots(self):
+        """Get the number of pending snapshots."""
+        return self.snapshot_count
     
     def add_snapshot(self, order_book: Dict[str, Any], timestamp: Optional[float] = None):
         """
@@ -87,7 +89,7 @@ class OrderBookSnapshotSaver:
         logger.debug(f"Added snapshot for {symbol} with update_id {update_id}")
         
         # Save to file if we've reached the maximum number of snapshots per file
-        if self.snapshot_count >= self.max_snapshots_per_file:
+        if self.snapshot_count >= self.snapshots_per_file:
             self.save_to_file()
     
     def save_to_file(self):
@@ -117,7 +119,6 @@ class OrderBookSnapshotSaver:
             self.snapshots = []
             self.snapshot_count = 0
             self.current_file_index += 1
-            self.last_save_time = time.time()
             
             return filepath
         except Exception as e:
