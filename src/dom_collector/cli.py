@@ -4,10 +4,13 @@ import sys
 import os
 import time
 import signal
+from dotenv import load_dotenv
 
 from dom_collector.binance_orderbook import BinanceOrderBook
 from dom_collector.snapshot_saver import OrderBookSnapshotSaver
 from dom_collector.logger import logger
+
+load_dotenv()
 
 
 def parse_args():
@@ -35,6 +38,10 @@ def parse_args():
         "--snapshots-per-file", type=int, default=3600,
         help="Number of snapshots to store in each file (default: 3600, ~1 hour at 1 snapshot/second)"
     )
+    binance_parser.add_argument(
+        "--save-to-spaces", action="store_true", 
+        help="Save snapshots to Digital Ocean Spaces (requires DO_SPACES_* environment variables)"
+    )
     
     return parser.parse_args()
 
@@ -45,6 +52,13 @@ async def run_binance_orderbook(args):
     max_depth = args.max_depth
     interval = args.interval
     snapshots_per_file = args.snapshots_per_file
+    save_to_spaces = args.save_to_spaces
+    
+    if save_to_spaces:
+        # Check if DO_SPACES_BUCKET is set
+        if not os.getenv("DO_SPACES_BUCKET"):
+            logger.error("DO_SPACES_BUCKET environment variable is required when --save-to-spaces is used")
+            sys.exit(1)
     
     os.makedirs(args.parquet_dir, exist_ok=True)
     
@@ -52,6 +66,9 @@ async def run_binance_orderbook(args):
     logger.info(f"Using max depth of {max_depth} price levels per side")
     logger.info(f"Saving snapshots every {interval} seconds")
     logger.info(f"Snapshots per file: {snapshots_per_file} (approx. {snapshots_per_file * interval / 3600:.1f} hours of data)")
+    
+    if save_to_spaces:
+        logger.info(f"Saving snapshots to Digital Ocean Spaces bucket: {os.getenv('DO_SPACES_BUCKET')}")
     
     order_book = BinanceOrderBook(
         symbol=symbol, 
@@ -62,6 +79,7 @@ async def run_binance_orderbook(args):
     snapshot_saver = OrderBookSnapshotSaver(
         output_dir=args.parquet_dir,
         snapshots_per_file=snapshots_per_file,
+        save_to_spaces=save_to_spaces,
     )
     
     shutdown_event = asyncio.Event()
