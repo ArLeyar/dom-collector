@@ -2,7 +2,6 @@ import argparse
 import asyncio
 import sys
 import os
-import time
 import signal
 from dotenv import load_dotenv
 
@@ -22,7 +21,7 @@ def parse_args():
         "--symbol", "-s", default="btcusdt", help="Trading symbol (default: btcusdt)"
     )
     binance_parser.add_argument(
-        "--depth", "-d", type=int, default=5000, help="Depth limit (default: 5000)"
+        "--depth", "-d", type=int, default=5000, help="Initial snapshot depth limit (default: 5000)"
     )
     binance_parser.add_argument(
         "--max-depth", "-m", type=int, default=10000, 
@@ -35,12 +34,16 @@ def parse_args():
         "--parquet-dir", default="snapshots", help="Directory to save Parquet files (default: snapshots)"
     )
     binance_parser.add_argument(
-        "--snapshots-per-file", type=int, default=3600,
-        help="Number of snapshots to store in each file (default: 3600, ~1 hour at 1 snapshot/second)"
+        "--save-interval", "-si", type=int, default=3600,
+        help="Time interval in seconds between creating new files (default: 3600, 1 hour)"
     )
     binance_parser.add_argument(
         "--save-to-spaces", action="store_true", 
         help="Save snapshots to Digital Ocean Spaces (requires DO_SPACES_* environment variables)"
+    )
+    binance_parser.add_argument(
+        "--retention-hours", type=int, default=24,
+        help="How long to keep files before deleting them (in hours, default: 24)"
     )
     
     return parser.parse_args()
@@ -51,11 +54,11 @@ async def run_binance_orderbook(args):
     depth_limit = args.depth
     max_depth = args.max_depth
     interval = args.interval
-    snapshots_per_file = args.snapshots_per_file
+    save_interval_seconds = args.save_interval
     save_to_spaces = args.save_to_spaces
+    retention_hours = args.retention_hours
     
     if save_to_spaces:
-        # Check if DO_SPACES_BUCKET is set
         if not os.getenv("DO_SPACES_BUCKET"):
             logger.error("DO_SPACES_BUCKET environment variable is required when --save-to-spaces is used")
             sys.exit(1)
@@ -65,7 +68,8 @@ async def run_binance_orderbook(args):
     logger.info(f"Starting order book manager for {symbol.upper()}")
     logger.info(f"Using max depth of {max_depth} price levels per side")
     logger.info(f"Saving snapshots every {interval} seconds")
-    logger.info(f"Snapshots per file: {snapshots_per_file} (approx. {snapshots_per_file * interval / 3600:.1f} hours of data)")
+    logger.info(f"Creating new files every {save_interval_seconds} seconds (approx. {save_interval_seconds / 3600:.1f} hours of data)")
+    logger.info(f"Files will be kept for {retention_hours} hours before being deleted")
     
     if save_to_spaces:
         logger.info(f"Saving snapshots to Digital Ocean Spaces bucket: {os.getenv('DO_SPACES_BUCKET')}")
@@ -78,9 +82,12 @@ async def run_binance_orderbook(args):
     
     snapshot_saver = OrderBookSnapshotSaver(
         output_dir=args.parquet_dir,
-        snapshots_per_file=snapshots_per_file,
+        save_interval_seconds=save_interval_seconds,
         save_to_spaces=save_to_spaces,
+        retention_hours=retention_hours,
     )
+    
+    await snapshot_saver.start()
     
     shutdown_event = asyncio.Event()
     
@@ -93,42 +100,17 @@ async def run_binance_orderbook(args):
     
     order_book_task = asyncio.create_task(order_book.start())
     
-    last_snapshot_time = 0
-    last_status_time = 0
-    last_connection_state = "disconnected"
-    last_state_change = time.time()
-    
     try:
         while not shutdown_event.is_set():
-            await asyncio.sleep(0.1)
-            
             try:
-                current_time = time.time()
-                
-                if hasattr(order_book, "connection_state"):
-                    current_state = order_book.connection_state
-                    if current_state != last_connection_state:
-                        state_duration = current_time - last_state_change
-                        logger.info(f"Connection state changed: {last_connection_state} → {current_state} (after {state_duration:.1f}s)")
-                        last_connection_state = current_state
-                        last_state_change = current_time
-                
-                if (current_time - last_snapshot_time) >= interval:
-                    current_book = order_book.get_full_order_book()
-                    if current_book["bids"] and current_book["asks"]:
-                        snapshot_saver.add_snapshot(current_book)
-                        last_snapshot_time = current_time
-                
-                if (current_time - last_status_time) >= 5.0:  # Hardcoded 5 second status interval
-                    current_book = order_book.get_full_order_book()
-                    connection_state = current_book.get("connection_state", "unknown")
-                    logger.info(f"Order Book for {current_book['symbol']} (Update ID: {current_book['lastUpdateId']}, State: {connection_state})")
-                    logger.info(f"Total Bids: {current_book['total_bids']}/{max_depth}, Total Asks: {current_book['total_asks']}/{max_depth}")
-                    last_status_time = current_time
-            
+                current_book = order_book.get_full_order_book()
+                if current_book["bids"] and current_book["asks"]:
+                    await snapshot_saver.add_snapshot(current_book)
+                    logger.debug(f"Saved snapshot for {current_book['symbol']} (Update ID: {current_book['lastUpdateId']})")
             except Exception as e:
-                logger.error(f"Error processing order book data: {e}")
-                await asyncio.sleep(1)
+                logger.error(f"Error saving snapshot: {e}")
+            
+            await asyncio.sleep(interval)
                 
     except asyncio.CancelledError:
         logger.debug("Main loop cancelled")
@@ -137,12 +119,7 @@ async def run_binance_orderbook(args):
     finally:
         logger.info("Shutting down...")
         
-        if snapshot_saver and snapshot_saver.pending_snapshots > 0:
-            logger.info(f"Saving {snapshot_saver.pending_snapshots} pending snapshots before exit")
-            try:
-                snapshot_saver.save_to_file()
-            except Exception as e:
-                logger.error(f"Error saving snapshots during shutdown: {e}")
+        await snapshot_saver.stop()
         
         if order_book_task:
             order_book_task.cancel()

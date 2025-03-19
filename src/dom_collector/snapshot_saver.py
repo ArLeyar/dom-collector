@@ -1,11 +1,10 @@
-"""Module for saving order book snapshots to Parquet."""
-
 import os
 import time
+import asyncio
 from datetime import datetime
 from typing import Dict, Any, Optional
 
-import pandas as pd
+import polars as pl
 import boto3
 from dotenv import load_dotenv
 
@@ -15,34 +14,37 @@ load_dotenv()
 
 
 class OrderBookSnapshotSaver:
-    """Class for saving order book snapshots to Parquet files."""
     
     def __init__(
         self,
         output_dir: str = "snapshots",
-        snapshots_per_file: int = 3600,
+        save_interval_seconds: int = 3600, 
         save_to_spaces: bool = False,
+        retention_hours: int = 24, 
     ):
         self.output_dir = output_dir
-        self.snapshots_per_file = snapshots_per_file
-        self.snapshots = []
-        self.snapshot_count = 0
+        self.save_interval_seconds = save_interval_seconds
         self.current_file_index = 0
         self.save_to_spaces = save_to_spaces
         self.spaces_bucket = None
+        self.snapshot_queue = asyncio.Queue()
+        self.consumer_task = None
+        self.running = False
+        self.last_save_time = time.time()
+        self.file_start_time = time.time()
+        self.retention_hours = retention_hours
         
         if self.save_to_spaces:
             self._init_spaces_client()
         
-        # Create output directory if it doesn't exist
         os.makedirs(output_dir, exist_ok=True)
         logger.info(f"Initialized OrderBookSnapshotSaver with output directory: {output_dir}")
-        logger.info(f"Snapshots per file: {snapshots_per_file}")
+        logger.info(f"Save interval: {save_interval_seconds} seconds")
+        logger.info(f"File retention period: {retention_hours} hours")
         if self.save_to_spaces and hasattr(self, 'spaces_client'):
             logger.info(f"Digital Ocean Spaces enabled with bucket: {self.spaces_bucket}")
     
     def _init_spaces_client(self):
-        """Initialize the Digital Ocean Spaces client."""
         try:
             region = os.getenv("DO_SPACES_REGION")
             endpoint_url = os.getenv("DO_SPACES_ENDPOINT_URL")
@@ -70,98 +72,174 @@ class OrderBookSnapshotSaver:
     
     @property
     def pending_snapshots(self):
-        """Get the number of pending snapshots."""
-        return self.snapshot_count
+        return self.snapshot_queue.qsize()
     
-    def add_snapshot(self, order_book: Dict[str, Any], timestamp: Optional[float] = None):
-        """
-        Add an order book snapshot.
+    async def start(self):
+        if self.running:
+            return
         
-        Args:
-            order_book: The order book data
-            timestamp: Optional timestamp (if not provided, current time is used)
-        """
+        self.running = True
+        self.consumer_task = asyncio.create_task(self._consumer())
+        logger.info("Started OrderBookSnapshotSaver consumer task")
+    
+    async def stop(self):
+        if not self.running:
+            return
+        
+        self.running = False
+        if self.consumer_task:
+            self.consumer_task.cancel()
+            try:
+                await self.consumer_task
+            except asyncio.CancelledError:
+                pass
+        
+        if self.snapshot_queue.qsize() > 0:
+            await self._save_snapshots_from_queue()
+        
+        logger.info("Stopped OrderBookSnapshotSaver consumer task")
+    
+    async def add_snapshot(self, order_book: Dict[str, Any], timestamp: Optional[float] = None):
         if timestamp is None:
             timestamp = time.time()
-            
-        # Extract symbol and update ID
+        
+        snapshot = order_book.copy()
+        snapshot['timestamp'] = timestamp
+        
+        await self.snapshot_queue.put(snapshot)
+        
         symbol = order_book.get("symbol", "UNKNOWN")
         update_id = order_book.get("lastUpdateId", 0)
-        
-        # Process bids and asks
-        bids = order_book.get("bids", {})
-        asks = order_book.get("asks", {})
-        
-        # Sort bids (descending) and asks (ascending)
-        sorted_bids = sorted(bids.items(), key=lambda x: float(x[0]), reverse=True)
-        sorted_asks = sorted(asks.items(), key=lambda x: float(x[0]))
-        
-        # Create bid and ask records
-        bid_records = []
-        for i, (price, qty) in enumerate(sorted_bids):
-            bid_records.append({
-                "timestamp": timestamp,
-                "symbol": symbol,
-                "update_id": update_id,
-                "side": "bid",
-                "level": i + 1,
-                "price": float(price),
-                "quantity": float(qty)
-            })
-            
-        ask_records = []
-        for i, (price, qty) in enumerate(sorted_asks):
-            ask_records.append({
-                "timestamp": timestamp,
-                "symbol": symbol,
-                "update_id": update_id,
-                "side": "ask",
-                "level": i + 1,
-                "price": float(price),
-                "quantity": float(qty)
-            })
-            
-        # Add all records to snapshots
-        self.snapshots.extend(bid_records + ask_records)
-        self.snapshot_count += 1
-        
         logger.debug(f"Added snapshot for {symbol} with update_id {update_id}")
-        
-        # Save to file if we've reached the maximum number of snapshots per file
-        if self.snapshot_count >= self.snapshots_per_file:
-            self.save_to_file()
     
-    def save_to_file(self):
-        """Save the current snapshots to a Parquet file."""
-        if not self.snapshots:
-            logger.debug("No snapshots to save")
-            return
-            
+    async def _consumer(self):
         try:
-            # Create DataFrame from snapshots
-            df = pd.DataFrame(self.snapshots)
+            while self.running:
+                current_time = time.time()
+                queue_size = self.snapshot_queue.qsize()
+                
+                time_since_file_start = current_time - self.file_start_time
+                if time_since_file_start >= self.save_interval_seconds and queue_size > 0:
+                    await self._save_snapshots_from_queue()
+                    self.last_save_time = current_time
+                    self.file_start_time = current_time 
+                    self.current_file_index += 1
+                
+                await asyncio.sleep(1)
+        except asyncio.CancelledError:
+            logger.debug("Consumer task cancelled")
+            raise
+        except Exception as e:
+            logger.error(f"Error in consumer task: {e}")
+    
+    def _cleanup_old_files(self):
+        try:
+            now = time.time()
+            retention_seconds = self.retention_hours * 3600
             
-            # Generate filename based on timestamp and symbol
-            first_record = self.snapshots[0]
-            symbol = first_record["symbol"]
-            start_time = datetime.fromtimestamp(first_record["timestamp"])
+            parquet_files = [f for f in os.listdir(self.output_dir) 
+                            if f.endswith('.parquet')]
+            
+            deleted_count = 0
+            for filename in parquet_files:
+                filepath = os.path.join(self.output_dir, filename)
+                file_mtime = os.path.getmtime(filepath)
+                
+                if now - file_mtime > retention_seconds:
+                    os.remove(filepath)
+                    deleted_count += 1
+                    logger.info(f"Deleted old file: {filename}")
+            
+            if deleted_count > 0:
+                logger.info(f"Cleaned up {deleted_count} old files")
+        except Exception as e:
+            logger.error(f"Error cleaning up old files: {e}")
+    
+    async def _save_snapshots_from_queue(self):
+        if self.snapshot_queue.empty():
+            logger.debug("No snapshots to save")
+            return None
+        
+        try:
+            first_snapshot = None
+            snapshot_count = 0
+            
+            schema = {
+                "timestamp": pl.Float64,
+                "symbol": pl.Utf8,
+                "update_id": pl.Int64,
+                "side": pl.Utf8,
+                "level": pl.Int32,
+                "price": pl.Float64,
+                "quantity": pl.Float64
+            }
+            
+            df = pl.DataFrame(schema=schema)
+            
+            while not self.snapshot_queue.empty():
+                try:
+                    snapshot = self.snapshot_queue.get_nowait()
+                    
+                    if first_snapshot is None:
+                        first_snapshot = snapshot
+                    
+                    snapshot_count += 1
+                    
+                    timestamp = snapshot.get("timestamp", time.time())
+                    symbol = snapshot.get("symbol", "UNKNOWN")
+                    update_id = snapshot.get("lastUpdateId", 0)
+                    bids = snapshot.get("bids", {})
+                    asks = snapshot.get("asks", {})
+                    
+                    records = []
+                    
+                    for i, (price, qty) in enumerate(bids.items()):
+                        records.append({
+                            "timestamp": timestamp,
+                            "symbol": symbol,
+                            "update_id": update_id,
+                            "side": "bid",
+                            "level": i + 1,
+                            "price": float(price),
+                            "quantity": float(qty)
+                        })
+                    
+                    for i, (price, qty) in enumerate(asks.items()):
+                        records.append({
+                            "timestamp": timestamp,
+                            "symbol": symbol,
+                            "update_id": update_id,
+                            "side": "ask",
+                            "level": i + 1,
+                            "price": float(price),
+                            "quantity": float(qty)
+                        })
+                    
+                    if records:
+                        batch_df = pl.DataFrame(records, schema=schema)
+                        df = pl.concat([df, batch_df])
+                    
+                    self.snapshot_queue.task_done()
+                except asyncio.QueueEmpty:
+                    break
+            
+            if first_snapshot is None or df.height == 0:
+                return None
+            
+            symbol = first_snapshot.get("symbol", "UNKNOWN")
+            start_time = datetime.fromtimestamp(first_snapshot.get("timestamp", time.time()))
             
             filename = f"{symbol}_orderbook_{start_time.strftime('%Y%m%d_%H%M%S')}_{self.current_file_index}.parquet"
             filepath = os.path.join(self.output_dir, filename)
             
-            # Save to Parquet
-            df.to_parquet(filepath, engine="pyarrow", compression="snappy")
+            df.write_parquet(filepath, compression="zstd")
             
-            logger.info(f"Saved {len(self.snapshots)} order book entries to {filepath}")
+            logger.info(f"Saved {df.height} order book entries from {snapshot_count} snapshots to {filepath}")
             
-            # Upload to Spaces if enabled
+            self._cleanup_old_files()
+            
             if self.save_to_spaces and hasattr(self, 'spaces_client'):
-                self._upload_to_spaces(filepath, filename)
-            
-            # Clear snapshots and increment counters
-            self.snapshots = []
-            self.snapshot_count = 0
-            self.current_file_index += 1
+                await asyncio.to_thread(self._upload_to_spaces, filepath, filename)
             
             return filepath
         except Exception as e:
@@ -169,12 +247,9 @@ class OrderBookSnapshotSaver:
             return None
     
     def _upload_to_spaces(self, local_filepath: str, filename: str):
-        """Upload a file to Digital Ocean Spaces."""
         try:
-            # Extract symbol from filename (format: SYMBOL_orderbook_TIMESTAMP_INDEX.parquet)
             symbol = filename.split('_')[0].lower()
             
-            # Create key with snapshots/symbol as folder structure
             spaces_key = f"snapshots/{symbol}/{filename}"
             
             with open(local_filepath, 'rb') as data:
@@ -190,4 +265,4 @@ class OrderBookSnapshotSaver:
             return spaces_url
         except Exception as e:
             logger.error(f"Failed to upload to Digital Ocean Spaces: {e}")
-            return None 
+            return None
