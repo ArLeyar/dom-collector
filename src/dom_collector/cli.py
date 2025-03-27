@@ -28,8 +28,8 @@ def parse_args():
         "--depth", "-d", type=int, default=400, help="Order book depth limit (default: 400)"
     )
     parser.add_argument(
-        "--max-depth", "-m", type=int, default=400, 
-        help="Maximum number of price levels to store per side (bids/asks) (default: 400)"
+        "--max-depth", "-m", type=int, default=5000, 
+        help="Maximum number of price levels to store per side (bids/asks) (default: 5000)"
     )
     parser.add_argument(
         "--interval", "-i", type=float, default=1.0, help="Update interval in seconds (default: 1.0)"

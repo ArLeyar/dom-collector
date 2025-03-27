@@ -1,0 +1,16 @@
+version: '3.8'
+
+services:
+  collector:
+    build: .
+    volumes:
+      - ./snapshots:/app/snapshots
+      - ./logs:/app/logs
+    env_file:
+      - .env
+    command: "collect-btc"
+    restart: unless-stopped
+
+volumes:
+  snapshots:
+    driver: local 
