@@ -1,8 +1,8 @@
-.PHONY: collect-btc collect-eth collect-sol collect-all clean-snapshots help test
+.PHONY: collect-btc collect-eth collect-sol collect-all collect-btc-detached clean-snapshots help test
 
-PYTHON = python
+POETRY = poetry run
 MODULE = src.dom_collector.cli
-EXCHANGE = binance
+EXCHANGE = okx
 INTERVAL = 1.0
 SAVE_INTERVAL = 60
 SAVE_TO_SPACES = false
@@ -16,6 +16,7 @@ help:
 	@echo "  make collect-eth        - Collect ETH/USDT order book snapshots"
 	@echo "  make collect-sol        - Collect SOL/USDT order book snapshots"
 	@echo "  make collect-all        - Collect order book snapshots for all symbols"
+	@echo "  make collect-btc-detached - Collect BTC/USDT order book snapshots in detached mode (for servers)"
 	@echo "  make clean-snapshots    - Remove all snapshot files"
 	@echo "  make test               - Run all tests"
 	@echo ""
@@ -28,24 +29,30 @@ help:
 
 collect-btc:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol btcusdt --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
+	$(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol BTC-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
 
 collect-eth:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol ethusdt --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
+	$(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol ETH-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
 
 collect-sol:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol solusdt --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
+	$(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol SOL-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
 
 collect-all:
 	mkdir -p snapshots
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol btcusdt --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,) & \
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol ethusdt --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,) & \
-	$(PYTHON) -m $(MODULE) $(EXCHANGE) --symbol solusdt --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
+	$(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol BTC-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,) & \
+	$(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol ETH-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,) & \
+	$(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol SOL-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,)
+
+collect-btc-detached:
+	mkdir -p snapshots logs
+	nohup $(POETRY) python -m $(MODULE) --exchange $(EXCHANGE) --symbol BTC-USDT --interval $(INTERVAL) --save-interval $(SAVE_INTERVAL) --retention-hours $(RETENTION_HOURS) $(if $(filter true,$(SAVE_TO_SPACES)),--save-to-spaces,) > logs/collect-btc.log 2>&1 &
+	@echo "BTC collection started in background. Check logs/collect-btc.log for output."
+	@echo "Process ID: $$(pgrep -f "python -m $(MODULE) --exchange $(EXCHANGE) --symbol BTC-USDT")"
 
 clean-snapshots:
 	rm -rf snapshots/*.parquet 
 
 test:
-	poetry run pytest -v 
+	poetry run pytest -v -s 

@@ -20,7 +20,8 @@ class OrderBookSnapshotSaver:
         output_dir: str = "snapshots",
         save_interval_seconds: int = 3600, 
         save_to_spaces: bool = False,
-        retention_hours: int = 24, 
+        retention_hours: int = 24,
+        exchange: str = "unknown",
     ):
         self.output_dir = output_dir
         self.save_interval_seconds = save_interval_seconds
@@ -33,6 +34,7 @@ class OrderBookSnapshotSaver:
         self.last_save_time = time.time()
         self.file_start_time = time.time()
         self.retention_hours = retention_hours
+        self.exchange = exchange.lower()
         
         if self.save_to_spaces:
             self._init_spaces_client()
@@ -41,6 +43,7 @@ class OrderBookSnapshotSaver:
         logger.info(f"Initialized OrderBookSnapshotSaver with output directory: {output_dir}")
         logger.info(f"Save interval: {save_interval_seconds} seconds")
         logger.info(f"File retention period: {retention_hours} hours")
+        logger.info(f"Exchange: {self.exchange}")
         if self.save_to_spaces and hasattr(self, 'spaces_client'):
             logger.info(f"Digital Ocean Spaces enabled with bucket: {self.spaces_bucket}")
     
@@ -109,7 +112,7 @@ class OrderBookSnapshotSaver:
         await self.snapshot_queue.put(snapshot)
         
         symbol = order_book.get("symbol", "UNKNOWN")
-        update_id = order_book.get("lastUpdateId", 0)
+        update_id = order_book.get("lastUpdateId", order_book.get("last_seq_id", 0))
         logger.debug(f"Added snapshot for {symbol} with update_id {update_id}")
     
     async def _consumer(self):
@@ -187,7 +190,7 @@ class OrderBookSnapshotSaver:
                     
                     timestamp = snapshot.get("timestamp", time.time())
                     symbol = snapshot.get("symbol", "UNKNOWN")
-                    update_id = snapshot.get("lastUpdateId", 0)
+                    update_id = snapshot.get("lastUpdateId", snapshot.get("last_seq_id", 0))
                     bids = snapshot.get("bids", {})
                     asks = snapshot.get("asks", {})
                     
@@ -229,7 +232,7 @@ class OrderBookSnapshotSaver:
             symbol = first_snapshot.get("symbol", "UNKNOWN")
             start_time = datetime.fromtimestamp(first_snapshot.get("timestamp", time.time()))
             
-            filename = f"{symbol}_orderbook_{start_time.strftime('%Y%m%d_%H%M%S')}_{self.current_file_index}.parquet"
+            filename = f"{symbol}-{self.exchange}-orderbook_{start_time.strftime('%Y%m%d_%H%M%S')}_{self.current_file_index}.parquet"
             filepath = os.path.join(self.output_dir, filename)
             
             df.write_parquet(filepath, compression="zstd")
@@ -248,7 +251,7 @@ class OrderBookSnapshotSaver:
     
     def _upload_to_spaces(self, local_filepath: str, filename: str):
         try:
-            symbol = filename.split('_')[0].lower()
+            symbol = filename.split('-')[0].lower()
             
             spaces_key = f"snapshots/{symbol}/{filename}"
             

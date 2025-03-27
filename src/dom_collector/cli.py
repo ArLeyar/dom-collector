@@ -6,6 +6,7 @@ import signal
 from dotenv import load_dotenv
 
 from dom_collector.binance_orderbook import BinanceOrderBook
+from dom_collector.okx_orderbook import OKXOrderBook
 from dom_collector.snapshot_saver import OrderBookSnapshotSaver
 from dom_collector.logger import logger
 
@@ -14,34 +15,37 @@ load_dotenv()
 
 def parse_args():
     parser = argparse.ArgumentParser(description="DOM Collector CLI")
-    subparsers = parser.add_subparsers(dest="command", help="Command to run")
+    parser.add_argument(
+        "--exchange", "-e", choices=["binance", "okx"], required=True,
+        help="Exchange to collect order book data from"
+    )
     
-    binance_parser = subparsers.add_parser("binance", help="Manage Binance order book")
-    binance_parser.add_argument(
-        "--symbol", "-s", default="btcusdt", help="Trading symbol (default: btcusdt)"
+    # Common arguments for both exchanges
+    parser.add_argument(
+        "--symbol", "-s", default="BTC-USDT", help="Trading symbol (default: BTC-USDT)"
     )
-    binance_parser.add_argument(
-        "--depth", "-d", type=int, default=5000, help="Initial snapshot depth limit (default: 5000)"
+    parser.add_argument(
+        "--depth", "-d", type=int, default=400, help="Order book depth limit (default: 400)"
     )
-    binance_parser.add_argument(
-        "--max-depth", "-m", type=int, default=10000, 
-        help="Maximum number of price levels to store per side (bids/asks) (default: 10000)"
+    parser.add_argument(
+        "--max-depth", "-m", type=int, default=400, 
+        help="Maximum number of price levels to store per side (bids/asks) (default: 400)"
     )
-    binance_parser.add_argument(
+    parser.add_argument(
         "--interval", "-i", type=float, default=1.0, help="Update interval in seconds (default: 1.0)"
     )
-    binance_parser.add_argument(
+    parser.add_argument(
         "--parquet-dir", default="snapshots", help="Directory to save Parquet files (default: snapshots)"
     )
-    binance_parser.add_argument(
+    parser.add_argument(
         "--save-interval", "-si", type=int, default=3600,
         help="Time interval in seconds between creating new files (default: 3600, 1 hour)"
     )
-    binance_parser.add_argument(
+    parser.add_argument(
         "--save-to-spaces", action="store_true", 
         help="Save snapshots to Digital Ocean Spaces (requires DO_SPACES_* environment variables)"
     )
-    binance_parser.add_argument(
+    parser.add_argument(
         "--retention-hours", type=int, default=24,
         help="How long to keep files before deleting them (in hours, default: 24)"
     )
@@ -49,7 +53,8 @@ def parse_args():
     return parser.parse_args()
 
 
-async def run_binance_orderbook(args):
+async def run_orderbook(args):
+    exchange = args.exchange
     symbol = args.symbol
     depth_limit = args.depth
     max_depth = args.max_depth
@@ -65,7 +70,7 @@ async def run_binance_orderbook(args):
     
     os.makedirs(args.parquet_dir, exist_ok=True)
     
-    logger.info(f"Starting order book manager for {symbol.upper()}")
+    logger.info(f"Starting {exchange} order book manager for {symbol}")
     logger.info(f"Using max depth of {max_depth} price levels per side")
     logger.info(f"Saving snapshots every {interval} seconds")
     logger.info(f"Creating new files every {save_interval_seconds} seconds (approx. {save_interval_seconds / 3600:.1f} hours of data)")
@@ -74,17 +79,25 @@ async def run_binance_orderbook(args):
     if save_to_spaces:
         logger.info(f"Saving snapshots to Digital Ocean Spaces bucket: {os.getenv('DO_SPACES_BUCKET')}")
     
-    order_book = BinanceOrderBook(
-        symbol=symbol, 
-        depth_limit=depth_limit, 
-        max_depth=max_depth
-    )
+    if exchange == "binance":
+        order_book = BinanceOrderBook(
+            symbol=symbol, 
+            depth_limit=depth_limit, 
+            max_depth=max_depth
+        )
+    else:  # okx
+        order_book = OKXOrderBook(
+            symbol=symbol,
+            depth_limit=depth_limit,
+            max_depth=max_depth
+        )
     
     snapshot_saver = OrderBookSnapshotSaver(
         output_dir=args.parquet_dir,
         save_interval_seconds=save_interval_seconds,
         save_to_spaces=save_to_spaces,
         retention_hours=retention_hours,
+        exchange=exchange,
     )
     
     await snapshot_saver.start()
@@ -106,7 +119,8 @@ async def run_binance_orderbook(args):
                 current_book = order_book.get_full_order_book()
                 if current_book["bids"] and current_book["asks"]:
                     await snapshot_saver.add_snapshot(current_book)
-                    logger.debug(f"Saved snapshot for {current_book['symbol']} (Update ID: {current_book['lastUpdateId']})")
+                    update_id = current_book.get("lastUpdateId", current_book.get("last_seq_id", "unknown"))
+                    logger.debug(f"Saved snapshot for {current_book['symbol']} (Update ID: {update_id})")
             except Exception as e:
                 logger.error(f"Error saving snapshot: {e}")
             
@@ -134,17 +148,13 @@ async def run_binance_orderbook(args):
 def main():
     args = parse_args()
     
-    if args.command == "binance":
-        try:
-            logger.info("Starting DOM Collector CLI with Binance order book")
-            asyncio.run(run_binance_orderbook(args))
-        except KeyboardInterrupt:
-            logger.warning("Program interrupted by user. Exiting...")
-        except Exception as e:
-            logger.error(f"Error: {e}")
-            sys.exit(1)
-    else:
-        logger.error("Please specify a command. Use --help for more information.")
+    try:
+        logger.info(f"Starting DOM Collector CLI with {args.exchange} order book")
+        asyncio.run(run_orderbook(args))
+    except KeyboardInterrupt:
+        logger.warning("Program interrupted by user. Exiting...")
+    except Exception as e:
+        logger.error(f"Error: {e}")
         sys.exit(1)
 
 
